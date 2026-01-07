@@ -1,3 +1,10 @@
+import sys
+import os
+
+# --- FIX FOR WINDOWS UNICODE ERROR ---
+# This forces the console to accept emojis like 🚨, ₹, 🏢 without crashing
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 import streamlit as st
 import PyPDF2
 from langchain_groq import ChatGroq
@@ -313,3 +320,4 @@ if uploaded_file is not None:
 else:
 
     st.info("👈 Waiting for file upload...")
+
