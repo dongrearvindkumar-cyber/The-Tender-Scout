@@ -40,14 +40,14 @@ with st.sidebar:
         st.info("Edit this to match your company details.")
         default_profile = """
         Company Name: Brihaspathi Technologies Pvt Ltd.
-        Annual Turnover: 45 Crores INR.
-        Years of Experience: 12 Years in IT/Surveillance.
+        Annual Turnover: 200 Crores INR.
+        Years of Experience: 18 Years in IT/Surveillance.
         Certifications: ISO 9001, ISO 27001.
-        Key Projects: Smart City Surveillance, ZP School Connectivity.
+        Key Projects: ECI, BSF, TGBE, MSRTC
         Solvency Certificate: Available for 10 Cr.
         Blacklisted: No.
         Manpower: 150 Engineers on payroll.
-        Locations: Head Office in Mumbai, Branch in Pune.
+        Locations: Head Office in Hyderabad.
         """
         company_profile = st.text_area("Your Credentials:", value=default_profile, height=250)
     
@@ -90,80 +90,155 @@ def extract_text_from_pdf(pdf_file):
         st.error(f"Error reading PDF: {e}")
     return text
 
+# --- FUNCTION: ANALYZE (The Brain) ---
 def analyze_tender(tender_text, my_profile, task_type):
     llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama-3.1-8b-instant")
     
-    # Reduce text to 15,000 chars to avoid rate limits
+    # 1. OPTIMIZED CONTEXT WINDOW
+    # We take the first 15k chars (Dates/Intro) and last 5k chars (BoM/Specs)
     if len(tender_text) > 20000:
-        safe_text = tender_text[:10000] + "\n...[MIDDLE SKIPPED]...\n" + tender_text[-5000:]
+        safe_text = tender_text[:15000] + "\n...[MIDDLE SKIPPED]...\n" + tender_text[-5000:]
     else:
         safe_text = tender_text
 
-    system_rules = """
-    CRITICAL INSTRUCTIONS:
-    1. Answer ONLY based on the "Tender Text" provided below.
-    2. Do NOT use outside knowledge.
-    3. If a specific detail (like a date or amount) is NOT in the text, write "NOT FOUND". Do not guess.
-    4. Be exact. Do not round off numbers.
+    # 2. THE MASTER SYSTEM INSTRUCTION (The "Guardrails")
+    # This block is injected into every request to stop hallucinations.
+    system_instruction = """
+    You are a specialized Tender Analysis Engine, not a chatbot.
+    CRITICAL RULES:
+    1. SOURCE TRUTH: Answer ONLY using the provided "TENDER DOCUMENT TEXT". Do not use outside knowledge.
+    2. NO HALLUCINATION: If a specific data point (like a date, amount, or brand) is not explicitly written in the text, you MUST write "NOT FOUND". Do not guess.
+    3. FORMATTING: Output strictly in the requested Markdown Table format. Do not add introductory text (like "Here is the table...") or concluding remarks.
+    4. PRECISION: Copy exact values (e.g., "Rs. 1,02,00,000" instead of "1.02 Cr").
     """
 
+    # 3. TASK-SPECIFIC PROMPTS
     if task_type == "Synopsis":
         prompt = f"""
-        {system_rules}
-        Role: Precision Bid Manager.
-        Task: Create a 'Tender At-a-Glance' Synopsis Table.
-        REQUIRED FIELDS: Tender Reference No., Name of Work / Project Name, Name of Department / Authority, Ministry (if applicable), Tender Fee & EMD Amount, Project Estimated Cost, Bid Submission Start Date, Bid Submission End Date, Bid Opening Date.
-        ELIGIBILITY CHECK (Pass/Fail): Turnover vs My Profile, Solvency vs My Profile, Experience vs My Profile, Technical Certifications vs My Profile.
-        MY PROFILE: {my_profile}
-        Tender Text: {safe_text}
+        {system_instruction}
+        
+        TASK: Extract Key Tender Details into a 'Synopsis Table'.
+        
+        INSTRUCTIONS:
+        - Scan the text for the specific fields listed below.
+        - Compare 'Eligibility' criteria against the 'MY COMPANY PROFILE' provided below.
+        
+        MY COMPANY PROFILE:
+        {my_profile}
+        
+        REQUIRED OUTPUT FORMAT (Markdown Table):
+        | Category | Parameter | Tender Requirement (Exact Text) | My Status (Pass/Fail/Info) | Remark |
+        |---|---|---|---|---|
+        | **Key Dates** | Bid Submission End Date | [Extract Date] | Info | - |
+        | **Key Dates** | Bid Opening Date | [Extract Date] | Info | - |
+        | **Financial** | EMD Amount | [Extract Amount] | Info | - |
+        | **Financial** | Tender Fee | [Extract Amount] | Info | - |
+        | **Authority** | Department Name | [Extract Name] | Info | - |
+        | **Authority** | Ministry | [Extract Name or "N/A"] | Info | - |
+        | **Eligibility** | Annual Turnover | [Extract Value] | [Pass/Fail] | [Compare with Profile] |
+        | **Eligibility** | Solvency | [Extract Value] | [Pass/Fail] | [Compare with Profile] |
+        | **Eligibility** | Experience | [Extract Years/Projects] | [Pass/Fail] | [Compare with Profile] |
+        
+        TENDER DOCUMENT TEXT:
+        {safe_text}
         """
+        
     elif task_type == "Eligibility":
         prompt = f"""
-        {system_rules}
-        Role: Strict Compliance Officer.
-        Task: Create a Clause-by-Clause Compliance Matrix.
-        Instructions: Extract eligibility criteria (Financial, Technical, Legal). Compare against 'MY PROFILE'.
-        Output Markdown Table Columns: | Category | Exact Tender Requirement | My Profile Value | Status (PASS/FAIL/UNKNOWN) |
-        MY PROFILE: {my_profile}
-        Tender Text: {safe_text}
+        {system_instruction}
+        
+        TASK: Create a Clause-by-Clause Compliance Matrix.
+        
+        INSTRUCTIONS:
+        - Identify every distinct criteria (Financial, Technical, Legal).
+        - Ignore general scope descriptions; focus on *requirements* (words like "must", "should", "shall", "required").
+        
+        MY COMPANY PROFILE:
+        {my_profile}
+        
+        REQUIRED OUTPUT FORMAT (Markdown Table):
+        | S.No | Category | Tender Clause / Requirement | My Profile Value | Compliance Status |
+        |---|---|---|---|---|
+        | 1 | Financial | [e.g. Minimum Turnover 5Cr] | [e.g. 45 Cr] | PASS |
+        | 2 | Technical | [e.g. ISO 9001 Required] | [e.g. ISO 9001 Available] | PASS |
+        | ... | ... | ... | ... | ... |
+        
+        TENDER DOCUMENT TEXT:
+        {safe_text}
         """
+
     elif task_type == "BoM":
         prompt = f"""
-        {system_rules}
-        Role: Senior Estimation Engineer.
-        Task: Extract the Bill of Materials (BoM).
-        Instructions: Extract Item Name, Specs, and Quantity. If Quantity is not clear, write "1 Set".
-        Output Markdown Table Columns: | S.No | Item Name | Detailed Specifications | Quantity |
-        Tender Text: {safe_text}
+        {system_instruction}
+        
+        TASK: Extract the Bill of Materials (BoM) / Price Schedule.
+        
+        INSTRUCTIONS:
+        - Look for the "Scope of Work", "Technical Specifications", or "BOQ" section.
+        - List every hardware or software item mentioned.
+        - If the quantity is unknown, write "1 Lot".
+        
+        REQUIRED OUTPUT FORMAT (Markdown Table):
+        | S.No | Item Name | Detailed Specifications | Quantity |
+        |---|---|---|---|
+        | 1 | [Item Name] | [Key Specs extracted from text] | [Qty] |
+        | ... | ... | ... | ... |
+        
+        TENDER DOCUMENT TEXT:
+        {safe_text}
         """
+        
     elif task_type == "Risks":
         prompt = f"""
-        {system_rules}
-        Role: Legal Risk Analyst.
-        Task: Identify High Risk Clauses.
-        Instructions: Look for: Payment Terms > 90 days, Unlimited Liability, High Penalty (>10%).
-        Tender Text: {safe_text}
+        {system_instruction}
+        
+        TASK: Identify Commercial & Legal Risks.
+        
+        INSTRUCTIONS:
+        - Scan for: Payment Terms (if >60 days), Liquidated Damages (LD), Penalties, Warranty (>3 years), PBG (>3%).
+        - Summarize the top 5 risks.
+        
+        REQUIRED OUTPUT FORMAT (Bullet Points):
+        ### 🚨 Risk Analysis Report
+        * **Payment Terms:** [Extract Clause] - [Risk Level: High/Med/Low]
+        * **Penalty / LD:** [Extract Clause]
+        * **Termination Clause:** [Extract Clause]
+        
+        TENDER DOCUMENT TEXT:
+        {safe_text}
         """
+
     elif task_type == "Queries":
         prompt = f"""
-        {system_rules}
-        Role: Bid Consultant.
-        Task: Draft Pre-Bid Queries.
-        Instructions: Identify ambiguous clauses. Create a formal query table.
-        Tender Text: {safe_text}
+        {system_instruction}
+        
+        TASK: Generate Pre-Bid Queries for ambiguous points.
+        
+        INSTRUCTIONS:
+        - Find clauses that are vague (e.g., "reputed make", "standard warranty").
+        - Draft a professional question asking for clarification.
+        
+        REQUIRED OUTPUT FORMAT (Markdown Table):
+        | S.No | Tender Clause / Ref | Ambiguity / Issue | Suggested Query to Authority |
+        |---|---|---|---|
+        | 1 | [e.g. Clause 4.2] | [e.g. "Reputed Make" is not defined] | "Please specify the approved list of makes." |
+        
+        TENDER DOCUMENT TEXT:
+        {safe_text}
         """
     
+    # 4. EXECUTION
     try:
         response = llm.invoke(prompt)
         return response.content
     except Exception as e:
-        return f"API Error: {str(e)}"
+        return f"Error: {str(e)}"
 
 def chat_with_tender(tender_text, user_question):
     llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama-3.1-8b-instant")
     safe_text = tender_text[:15000]
     prompt = f"""
-    Role: Helpful Tender Assistant.
+    Role: Expert Tender Assistant and a Copywriter.
     Context: You are reading a specific Tender Document.
     Task: Answer the user's question strictly based on the Tender Text below.
     Tender Text: {safe_text}
@@ -236,4 +311,5 @@ if uploaded_file is not None:
                     st.error(f"Error: {e}")
 
 else:
+
     st.info("👈 Waiting for file upload...")
