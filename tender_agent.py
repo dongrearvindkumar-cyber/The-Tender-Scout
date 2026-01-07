@@ -6,8 +6,7 @@ from langchain_groq import ChatGroq
 import pandas as pd
 import io
 
-# --- 1. SYSTEM FIXES (CRITICAL) ---
-# This fixes the "UnicodeEncodeError" / Emoji crash on Windows & Logs
+# --- 1. SYSTEM FIXES ---
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
@@ -19,11 +18,8 @@ st.set_page_config(
 )
 
 # --- 3. UI HEADER ---
-# Columns to place Logo next to Title
 col1, col2 = st.columns([1, 5])
 with col1:
-    # Ensure 'Brihaspathi_logo.png' is inside your GitHub repository
-    # If the file is missing, it will just show a broken image icon (won't crash)
     try:
         st.image("Brihaspathi_logo.png", width=140)
     except:
@@ -34,45 +30,35 @@ with col2:
 
 st.divider()
 
-# --- 4. SIDEBAR INPUTS ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # Secure API Key Entry
     api_key_input = st.text_input("Enter Groq API Key:", type="password")
-    
-    # Stop the app if no key is provided
     if not api_key_input:
-        st.warning("⚠️ Please enter your API Key to proceed.")
+        st.warning("⚠️ Enter API Key to proceed.")
         st.stop()
-        
     GROQ_API_KEY = api_key_input
 
     st.divider()
 
-    # Company Profile (Collapsible for cleaner look)
     with st.expander("🏢 Your Company Profile", expanded=False):
-        st.info("Edit this to match your exact credentials.")
         default_profile = """
         Company Name: Brihaspathi Technologies Pvt Ltd.
-        Annual Turnover: 200 Crores INR.
-        Years of Experience: 18 Years in IT/Surveillance/Networking.
+        Annual Turnover: 45 Crores INR.
+        Years of Experience: 12 Years in IT/Surveillance/Networking.
         Certifications: ISO 9001, ISO 27001, CMMI Level 3.
-        Key Projects: Smart City Surveillance, ZP School Connectivity, Safe City Project, Border Security Force, Maharashtra State Road Transport Corporation.
+        Key Projects: Smart City Surveillance, ZP School Connectivity.
         Solvency Certificate: Available for 15 Cr.
         Blacklisted: No.
-        Manpower: 150+ Engineers on payroll.
-        Locations: Head Office in Hyderabad, Branches Pan-India.
         """
         company_profile = st.text_area("Profile Data:", value=default_profile, height=300)
     
     st.divider()
     
-    # File Uploader
     st.header("📂 Tender Document")
     uploaded_file = st.file_uploader("Upload PDF here", type="pdf")
     
-    # Chat History Clear Button
     if st.button("Clear Chat Memory"):
         if "messages" in st.session_state:
             st.session_state.messages = []
@@ -81,14 +67,12 @@ with st.sidebar:
 # --- 5. CORE FUNCTIONS ---
 
 def extract_text_from_pdf(pdf_file):
-    """
-    Reads PDF text safely. Limits to first 150 pages to prevent memory issues.
-    """
     reader = PyPDF2.PdfReader(pdf_file)
     text = ""
     try:
+        # Increased to 60 pages to ensure we catch middle sections
         for i, page in enumerate(reader.pages):
-            if i > 150: # Limit to 50 pages
+            if i > 60: 
                 break
             content = page.extract_text()
             if content:
@@ -98,21 +82,13 @@ def extract_text_from_pdf(pdf_file):
     return text
 
 def markdown_table_to_df(markdown_text):
-    """
-    Converts AI's Markdown table into a Pandas DataFrame for Excel export.
-    """
     try:
         lines = markdown_text.split('\n')
-        # Filter lines that look like table rows (contain pipes |)
         table_lines = [line for line in lines if '|' in line]
         if len(table_lines) < 3:
             return None
-        
-        # Join and read into Pandas
         table_str = "\n".join(table_lines)
         df = pd.read_csv(io.StringIO(table_str), sep="|", engine='python', skipinitialspace=True)
-        
-        # Clean up empty columns from side pipes
         df = df.dropna(axis=1, how='all')
         df.columns = [c.strip() for c in df.columns]
         return df
@@ -120,49 +96,61 @@ def markdown_table_to_df(markdown_text):
         return None
 
 def analyze_tender(tender_text, my_profile, task_type):
-    """
-    The Brain: Sends strict prompts to Llama 3.1 via Groq.
-    """
     llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama-3.1-8b-instant")
     
-    # --- CONTEXT SLICING (Fixes Rate Limit) ---
-    # We take the Start (Dates/Terms) and End (BoM/Specs)
-    # Total limit ~15,000 chars (approx 3.5k tokens) to stay safe within 6k limit
-    if len(tender_text) > 20000:
-        safe_text = tender_text[:10000] + "\n\n...[MIDDLE CONTENT SKIPPED]...\n\n" + tender_text[-5000:]
-    else:
-        safe_text = tender_text
+    # --- SMART SLICING STRATEGY ---
+    # Different tasks need different parts of the document.
+    
+    if task_type in ["Synopsis", "Eligibility"]:
+        # PRIORITY: START OF DOC
+        # PQC/Eligibility is almost always in the first 30% of the doc.
+        # We take the first 14,000 chars and just 1,000 of the end (for dates).
+        if len(tender_text) > 15000:
+            safe_text = tender_text[:14000] + "\n...[End Section]...\n" + tender_text[-1000:]
+        else:
+            safe_text = tender_text
 
-    # --- STRICT SYSTEM PROMPTS (Fixes Formatting & Hallucinations) ---
+    elif task_type in ["BoM", "Risks"]:
+        # PRIORITY: END OF DOC
+        # BoM/Price Schedule is almost always in the last 30%.
+        if len(tender_text) > 15000:
+            safe_text = tender_text[:2000] + "\n...[Middle Skipped]...\n" + tender_text[-13000:]
+        else:
+            safe_text = tender_text
+            
+    else:
+        # BALANCED (Queries/Chat)
+        if len(tender_text) > 15000:
+            safe_text = tender_text[:10000] + "\n...[Middle Skipped]...\n" + tender_text[-5000:]
+        else:
+            safe_text = tender_text
+
+    # --- STRICT SYSTEM PROMPTS ---
     system_header = """
-    You are a specialized Bid Analysis Engine. 
-    SYSTEM RULES:
-    1. NO HALLUCINATIONS: If a value (date, amount, clause) is not in the text, write "NOT FOUND". Do not guess.
-    2. STRICT FORMATTING: Output ONLY the Markdown table requested. Do not write introductory text like "Here is the analysis".
-    3. DATA SOURCE: Use only the provided 'TENDER TEXT' below.
+    You are a Strict Bid Compliance Officer. 
+    RULES:
+    1. QUOTE THE SOURCE: For every criteria found, you must mention the Section Name or Clause No if visible.
+    2. SEPARATION OF CONCERNS: 
+       - If asked for 'Eligibility', look ONLY for Pre-Qualification Criteria (Turnover, Exp, Legal). IGNORE technical specs.
+       - If asked for 'BoM', look ONLY for Technical Specifications.
+    3. NO GUESSING: If a criteria is missing, write "NOT FOUND".
     """
 
     if task_type == "Synopsis":
         prompt = f"""
         {system_header}
-        TASK: Extract Key Data & Check Eligibility.
+        TASK: Extract Key Tender Data.
         
-        MY PROFILE:
-        {my_profile}
-        
-        REQUIRED OUTPUT FORMAT (Markdown Table Only):
-        | Category | Parameter | Tender Requirement (Exact Text) | My Status (Pass/Fail/Info) | Remark/Gap |
-        |---|---|---|---|---|
-        | **Project Info** | Tender Reference No | [Extract] | Info | - |
-        | **Project Info** | Authority / Dept Name | [Extract] | Info | - |
-        | **Dates** | Bid Submission End Date | [Extract] | Info | - |
-        | **Dates** | Bid Opening Date | [Extract] | Info | - |
-        | **Financial** | Estimated Project Cost | [Extract] | Info | - |
-        | **Financial** | EMD Amount | [Extract] | Info | - |
-        | **Eligibility** | Annual Turnover Required | [Extract Value] | [Pass/Fail] | [Compare with Profile] |
-        | **Eligibility** | Solvency Required | [Extract Value] | [Pass/Fail] | [Compare with Profile] |
-        | **Eligibility** | Past Experience | [Extract Criteria] | [Pass/Fail] | [Compare with Profile] |
-        | **Eligibility** | Certifications (ISO/CMMI) | [Extract List] | [Pass/Fail] | [Compare with Profile] |
+        REQUIRED OUTPUT FORMAT (Markdown Table):
+        | Category | Parameter | Tender Requirement (Quote Exact Text) | My Status (Pass/Fail/Info) |
+        |---|---|---|---|
+        | **Project** | Tender Ref No | [Extract] | Info |
+        | **Project** | Authority Name | [Extract] | Info |
+        | **Dates** | Bid Submission End Date | [Extract] | Info |
+        | **Financial** | EMD Amount | [Extract] | Info |
+        | **Eligibility** | Avg Annual Turnover | [Extract Financial Clause] | [Pass/Fail vs {my_profile}] |
+        | **Eligibility** | Solvency Amount | [Extract Financial Clause] | [Pass/Fail vs {my_profile}] |
+        | **Eligibility** | Past Experience | [Extract "Similar Work" Clause] | [Pass/Fail vs {my_profile}] |
         
         TENDER TEXT:
         {safe_text}
@@ -171,18 +159,23 @@ def analyze_tender(tender_text, my_profile, task_type):
     elif task_type == "Eligibility":
         prompt = f"""
         {system_header}
-        TASK: Detailed Clause-by-Clause Compliance Matrix.
-        INSTRUCTION: Extract every technical, financial, and legal mandatory requirement.
+        TASK: Detailed PRE-QUALIFICATION (PQC) Matrix.
+        
+        INSTRUCTIONS:
+        1. Scan for the section titled "Eligibility Criteria", "Pre-Qualification Criteria", or "Minimum Qualification".
+        2. Extract ONLY the mandatory requirements for the BIDDER (Company).
+        3. DO NOT extract "Scope of Work" or "Product Specifications" here.
         
         MY PROFILE:
         {my_profile}
         
-        REQUIRED OUTPUT FORMAT (Markdown Table Only):
-        | S.No | Category | Tender Requirement (Exact Clause) | My Profile / Value | Status (PASS/FAIL) |
+        REQUIRED OUTPUT FORMAT (Markdown Table):
+        | S.No | Criteria Type | Clause / Requirement | Section/Page Ref | My Status |
         |---|---|---|---|---|
-        | 1 | Financial | [e.g. Min Turnover 50Cr] | [e.g. 45Cr] | FAIL |
-        | 2 | Technical | [e.g. CMMI Lvl 5] | [e.g. CMMI Lvl 3] | FAIL |
-        | 3 | Legal | [e.g. Not Blacklisted] | [Not Blacklisted] | PASS |
+        | 1 | Turnover | [e.g. "Avg Turnover of 5Cr in last 3 years"] | [e.g. Clause 4.1] | [Pass/Fail] |
+        | 2 | Experience | [e.g. "3 similar projects of 10Cr"] | [e.g. Section III] | [Pass/Fail] |
+        | 3 | Certifications | [e.g. "ISO 9001:2015 Mandatory"] | [e.g. Clause 5.2] | [Pass/Fail] |
+        | 4 | Legal | [e.g. "Not Blacklisted"] | [e.g. Annexure 1] | [Pass/Fail] |
         
         TENDER TEXT:
         {safe_text}
@@ -191,14 +184,16 @@ def analyze_tender(tender_text, my_profile, task_type):
     elif task_type == "BoM":
         prompt = f"""
         {system_header}
-        TASK: Extract Bill of Materials (BoM).
-        INSTRUCTION: List all hardware/software items found in Scope or Technical Specs.
+        TASK: Extract Bill of Materials / Scope of Supply.
         
-        REQUIRED OUTPUT FORMAT (Markdown Table Only):
-        | S.No | Item Name | Detailed Specifications (Make/Model/Specs) | Quantity |
+        INSTRUCTIONS:
+        1. Scan for "Technical Specifications", "Bill of Quantities (BoQ)", or "Scope of Work".
+        2. List the Hardware, Software, or Licenses required.
+        
+        REQUIRED OUTPUT FORMAT (Markdown Table):
+        | S.No | Item Name | Specific Technical Requirements (Make/Model/Specs) | Quantity |
         |---|---|---|---|
         | 1 | [Item Name] | [Extract Key Specs] | [Qty] |
-        | 2 | [Item Name] | [Extract Key Specs] | [Qty] |
         
         TENDER TEXT:
         {safe_text}
@@ -208,14 +203,12 @@ def analyze_tender(tender_text, my_profile, task_type):
         prompt = f"""
         {system_header}
         TASK: Identify Commercial Risks.
-        INSTRUCTION: Look for Payment Terms (>90 days), High Penalty (>10%), Liquidated Damages, Unlimited Liability.
         
         REQUIRED OUTPUT FORMAT (Bulleted List):
         ### 🚨 Risk Assessment Report
-        * **Payment Terms:** [Extract Clause] - [Risk: High/Medium/Low]
+        * **Payment Terms:** [Extract Clause]
         * **Penalty / LD:** [Extract Clause]
-        * **Warranty:** [Extract Period]
-        * **Termination:** [Extract Clause]
+        * **PBG / Warranty:** [Extract Clause]
         
         TENDER TEXT:
         {safe_text}
@@ -225,12 +218,11 @@ def analyze_tender(tender_text, my_profile, task_type):
         prompt = f"""
         {system_header}
         TASK: Draft Pre-Bid Queries.
-        INSTRUCTION: Find ambiguous terms (e.g. "Reputed make", "Standard warranty") and ask for clarification.
         
-        REQUIRED OUTPUT FORMAT (Markdown Table Only):
-        | S.No | Clause Reference | Ambiguity / Issue | Drafted Query for Authority |
+        REQUIRED OUTPUT FORMAT (Markdown Table):
+        | S.No | Clause Reference | Ambiguity / Issue | Drafted Query |
         |---|---|---|---|
-        | 1 | [e.g. Clause 4.1] | [Explain issue] | [Draft polite query] |
+        | 1 | [Clause No] | [Description] | [Query] |
         
         TENDER TEXT:
         {safe_text}
@@ -240,22 +232,14 @@ def analyze_tender(tender_text, my_profile, task_type):
         response = llm.invoke(prompt)
         return response.content
     except Exception as e:
-        return f"API Error (Likely Rate Limit): {str(e)}"
+        return f"API Error: {str(e)}"
 
 def chat_with_tender(tender_text, user_question):
-    """
-    Free-form chat. Uses a smaller context window (15k) to stay fast.
-    """
     llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama-3.1-8b-instant")
     safe_text = tender_text[:15000] 
-    
     prompt = f"""
-    You are a helpful Tender Assistant.
-    Answer the user question strictly based on the text below.
-    
-    TENDER TEXT:
-    {safe_text}
-    
+    Answer strictly based on the provided text.
+    TENDER TEXT: {safe_text}
     QUESTION: {user_question}
     """
     try:
@@ -266,107 +250,65 @@ def chat_with_tender(tender_text, user_question):
 # --- 6. MAIN APP LOGIC ---
 
 if uploaded_file is not None:
-    # 1. Read File (Only once per upload)
     if "tender_text" not in st.session_state:
-        with st.spinner("📄 Reading and Indexing Document..."):
+        with st.spinner("📄 Reading PDF (First 60 Pages)..."):
             text = extract_text_from_pdf(uploaded_file)
             st.session_state.tender_text = text
-            st.success(f"✅ Document Processed! ({len(text)} characters extracted)")
+            st.success(f"✅ Document Processed!")
 
-    # 2. Define Tabs
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📅 Synopsis", 
-        "⚖️ Eligibility", 
-        "🛠️ BoM (Export)", 
-        "🚩 Risks", 
-        "✉️ Queries", 
-        "💬 Chat"
+        "📅 Synopsis", "⚖️ Eligibility", "🛠️ BoM (Export)", "🚩 Risks", "✉️ Queries", "💬 Chat"
     ])
 
-    # 3. Tab Functionality
-    
-    # --- SYNOPSIS TAB ---
     with tab1:
-        st.caption("Generates a 'Bid/No-Bid' Summary Table.")
         if st.button("Generate Synopsis"):
-            with st.spinner("Analyzing Tender Data..."):
+            with st.spinner("Analyzing..."):
                 result = analyze_tender(st.session_state.tender_text, company_profile, "Synopsis")
                 st.markdown(result)
 
-    # --- ELIGIBILITY TAB ---
     with tab2:
-        st.caption("Checks every clause against your Company Profile.")
+        st.info("ℹ️ Focuses on Pre-Qualification (Turnover, Exp, ISO). Ignores Tech Specs.")
         if st.button("Check Compliance"):
-            with st.spinner("Verifying Credentials..."):
+            with st.spinner("Scanning for PQC..."):
                 result = analyze_tender(st.session_state.tender_text, company_profile, "Eligibility")
                 st.markdown(result)
 
-    # --- BOM TAB (With CSV Export) ---
     with tab3:
-        st.caption("Extracts Line Items for Cost Estimation.")
         if st.button("Extract Bill of Materials"):
-            with st.spinner("Scanning for Hardware/Software..."):
+            with st.spinner("Scanning for Line Items..."):
                 result = analyze_tender(st.session_state.tender_text, company_profile, "BoM")
                 st.markdown(result)
-                
-                # Convert to CSV button
                 df = markdown_table_to_df(result)
                 if df is not None:
                     csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="📥 Download BoM as CSV",
-                        data=csv,
-                        file_name="tender_bom.csv",
-                        mime="text/csv"
-                    )
+                    st.download_button(label="📥 Download CSV", data=csv, file_name="tender_bom.csv", mime="text/csv")
 
-    # --- RISK TAB ---
     with tab4:
-        st.caption("Highlights Hidden Penalties & Payment Issues.")
         if st.button("Scan for Risks"):
-            with st.spinner("Auditing Legal Clauses..."):
+            with st.spinner("Auditing..."):
                 result = analyze_tender(st.session_state.tender_text, company_profile, "Risks")
                 st.markdown(result)
 
-    # --- QUERIES TAB ---
     with tab5:
-        st.caption("Drafts official questions for the Pre-Bid Meeting.")
         if st.button("Draft Pre-Bid Queries"):
-            with st.spinner("Finding Ambiguities..."):
+            with st.spinner("Thinking..."):
                 result = analyze_tender(st.session_state.tender_text, company_profile, "Queries")
                 st.markdown(result)
 
-    # --- CHAT TAB ---
     with tab6:
         st.subheader("Ask the Document")
-        
-        # Initialize chat history
         if "messages" not in st.session_state:
             st.session_state.messages = []
-
-        # Display history
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
-
-        # Chat Input
         if prompt := st.chat_input("Ex: What are the payment terms?"):
-            # User Message
             st.chat_message("user").markdown(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
-
-            # AI Response
             with st.spinner("Thinking..."):
                 response = chat_with_tender(st.session_state.tender_text, prompt)
                 st.chat_message("assistant").markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
 
 else:
-    # Landing Page State
-    st.info("👈 Please upload a Tender PDF to begin analysis.")
-    st.markdown("""
-    ### How to use:
-    1. Enter your **Groq API Key** in the sidebar.
-    2. Upload a **Tender PDF**.
-    3. Click the tabs above to extract data.
-    """)
+    st.info("👈 Upload Tender PDF to begin.")
