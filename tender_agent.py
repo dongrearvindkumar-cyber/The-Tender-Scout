@@ -103,12 +103,17 @@ def extract_pdf_content(pdf_file):
     
     return text_start + "\n...[MIDDLE SKIPPED]...\n" + text_end
 
-# --- 5. AI LOGIC ENGINE ---
+# --- 5. AI LOGIC ENGINE (Fixed for Rate Limits) ---
 def analyze_tender(tender_text, profile, task_type):
     llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama-3.1-8b-instant")
     
-    # Limit context size to prevent rate limits
-    safe_text = tender_text[:25000] # Approx 6k tokens
+    # RATE LIMIT FIX: 
+    # Reduced from 25,000 to 18,000 characters to stay under the 6000 token/min limit.
+    # We take the first 14,000 chars (Synopsis/PQC) and last 4,000 chars (BoM).
+    if len(tender_text) > 18000:
+        safe_text = tender_text[:14000] + "\n...[MIDDLE SKIPPED]...\n" + tender_text[-4000:]
+    else:
+        safe_text = tender_text
 
     # MASTER PERSONA
     system_instruction = """
@@ -266,7 +271,6 @@ def analyze_tender(tender_text, profile, task_type):
         return response.content
     except Exception as e:
         return f"API Error: {str(e)}"
-
 def chat_engine(tender_text, question):
     llm = ChatGroq(groq_api_key=GROQ_API_KEY, model_name="llama-3.1-8b-instant")
     safe_text = tender_text[:20000]
@@ -379,3 +383,4 @@ if uploaded_file:
 
 else:
     st.info("👈 Please upload a Tender PDF to begin.")
+
