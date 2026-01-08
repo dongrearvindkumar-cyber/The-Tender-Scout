@@ -3,3 +3,7 @@ PyPDF2
 langchain-groq
 pandas
 openpyxl
+langchain-community
+faiss-cpu
+sentence-transformers
+huggingface-hub
